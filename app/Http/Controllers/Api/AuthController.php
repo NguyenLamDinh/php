@@ -26,7 +26,7 @@ class AuthController extends Controller
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:customers',
-            'password' => 'required|string|min:8|confirmed',
+            'password' => 'required|string|min:8',
         ]);
 
         if ($validator->fails()) {
@@ -116,15 +116,7 @@ class AuthController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'Login successful',
-                'data' => [
-                    'customer' => [
-                        'id' => $customer->id,
-                        'name' => $customer->name,
-                        'email' => $customer->email,
-                        'last_login_at' => $customer->last_login_at,
-                    ],
-                    'session_id' => $sessionId,
-                ]
+                'sessionId' => $sessionId
             ]);
 
         } catch (\Exception $e) {

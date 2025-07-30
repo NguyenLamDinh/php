@@ -2,20 +2,14 @@
 
 namespace App\Services;
 
-use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
 
 class SessionService
 {
-    private $redis;
     private $sessionPrefix = 'customer_session:';
     private $sessionExpire = 7200; // 2 giờ (7200 giây)
-
-    public function __construct()
-    {
-        $this->redis = Redis::connection('session');
-    }
 
     /**
      * Tạo session mới cho customer
@@ -34,8 +28,14 @@ class SessionService
             'user_agent' => request()->header('User-Agent', ''),
         ];
 
-        // Lưu session vào Redis với thời gian expire
-        $this->redis->setex($sessionKey, $this->sessionExpire, json_encode($sessionData));
+        // Lưu session vào database cache table
+        DB::table('cache')->updateOrInsert(
+            ['key' => $sessionKey],
+            [
+                'value' => json_encode($sessionData),
+                'expiration' => Carbon::now()->addSeconds($this->sessionExpire)->timestamp
+            ]
+        );
 
         return $sessionId;
     }
@@ -46,56 +46,109 @@ class SessionService
     public function getSession($sessionId)
     {
         $sessionKey = $this->sessionPrefix . $sessionId;
-        $sessionData = $this->redis->get($sessionKey);
 
-        if (!$sessionData) {
+        $session = DB::table('cache')
+            ->where('key', $sessionKey)
+            ->where('expiration', '>', Carbon::now()->timestamp)
+            ->first();
+
+        if (!$session) {
             return null;
         }
 
-        $data = json_decode($sessionData, true);
+        $sessionData = json_decode($session->value, true);
 
-        // Cập nhật last_activity và gia hạn session
-        $data['last_activity'] = Carbon::now()->toISOString();
-        $this->redis->setex($sessionKey, $this->sessionExpire, json_encode($data));
+        // Cập nhật last activity
+        $this->updateLastActivity($sessionId);
 
-        return $data;
+        return $sessionData;
     }
 
     /**
-     * Xóa session (logout)
+     * Cập nhật thời gian hoạt động cuối
+     */
+    public function updateLastActivity($sessionId)
+    {
+        $sessionKey = $this->sessionPrefix . $sessionId;
+
+        $session = DB::table('cache')->where('key', $sessionKey)->first();
+
+        if ($session) {
+            $sessionData = json_decode($session->value, true);
+            $sessionData['last_activity'] = Carbon::now()->toISOString();
+
+            DB::table('cache')
+                ->where('key', $sessionKey)
+                ->update([
+                    'value' => json_encode($sessionData),
+                    'expiration' => Carbon::now()->addSeconds($this->sessionExpire)->timestamp
+                ]);
+        }
+    }
+
+    /**
+     * Xóa session
      */
     public function destroySession($sessionId)
     {
         $sessionKey = $this->sessionPrefix . $sessionId;
-        return $this->redis->del($sessionKey);
+        DB::table('cache')->where('key', $sessionKey)->delete();
     }
 
     /**
-     * Kiểm tra session có tồn tại không
+     * Lấy tất cả session đang hoạt động của customer
      */
-    public function sessionExists($sessionId)
+    public function getActiveSessions($customerId)
     {
-        $sessionKey = $this->sessionPrefix . $sessionId;
-        return $this->redis->exists($sessionKey);
+        $sessions = DB::table('cache')
+            ->where('key', 'like', $this->sessionPrefix . '%')
+            ->where('expiration', '>', Carbon::now()->timestamp)
+            ->get();
+
+        $activeSessions = [];
+
+        foreach ($sessions as $session) {
+            $sessionData = json_decode($session->value, true);
+
+            if ($sessionData && $sessionData['customer_id'] == $customerId) {
+                $sessionId = str_replace($this->sessionPrefix, '', $session->key);
+                $activeSessions[] = [
+                    'session_id' => $sessionId,
+                    'created_at' => $sessionData['created_at'],
+                    'last_activity' => $sessionData['last_activity'],
+                    'ip_address' => $sessionData['ip_address'],
+                    'user_agent' => $sessionData['user_agent'],
+                ];
+            }
+        }
+
+        return $activeSessions;
     }
 
     /**
-     * Xóa tất cả session của một customer
+     * Xóa tất cả session của customer
      */
     public function destroyAllUserSessions($customerId)
     {
-        $pattern = $this->sessionPrefix . '*';
-        $keys = $this->redis->keys($pattern);
+        $sessions = DB::table('cache')
+            ->where('key', 'like', $this->sessionPrefix . '%')
+            ->get();
 
-        foreach ($keys as $key) {
-            $sessionData = $this->redis->get($key);
-            if ($sessionData) {
-                $data = json_decode($sessionData, true);
-                if ($data['customer_id'] == $customerId) {
-                    $this->redis->del($key);
-                }
+        foreach ($sessions as $session) {
+            $sessionData = json_decode($session->value, true);
+
+            if ($sessionData && $sessionData['customer_id'] == $customerId) {
+                DB::table('cache')->where('key', $session->key)->delete();
             }
         }
+    }
+
+    /**
+     * Kiểm tra session có tồn tại và hợp lệ không
+     */
+    public function isValidSession($sessionId)
+    {
+        return $this->getSession($sessionId) !== null;
     }
 
     /**
@@ -103,33 +156,17 @@ class SessionService
      */
     private function generateSessionId()
     {
-        return Str::random(60) . '_' . time();
+        return Str::random(64);
     }
 
     /**
-     * Lấy danh sách session đang active của customer
+     * Làm sạch session hết hạn
      */
-    public function getActiveSessions($customerId)
+    public function cleanExpiredSessions()
     {
-        $pattern = $this->sessionPrefix . '*';
-        $keys = $this->redis->keys($pattern);
-        $sessions = [];
-
-        foreach ($keys as $key) {
-            $sessionData = $this->redis->get($key);
-            if ($sessionData) {
-                $data = json_decode($sessionData, true);
-                if ($data['customer_id'] == $customerId) {
-                    $sessions[] = [
-                        'session_id' => str_replace($this->sessionPrefix, '', $key),
-                        'created_at' => $data['created_at'],
-                        'last_activity' => $data['last_activity'],
-                        'ip_address' => $data['ip_address'],
-                    ];
-                }
-            }
-        }
-
-        return $sessions;
+        DB::table('cache')
+            ->where('key', 'like', $this->sessionPrefix . '%')
+            ->where('expiration', '<=', Carbon::now()->timestamp)
+            ->delete();
     }
 }
