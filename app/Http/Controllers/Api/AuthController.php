@@ -44,15 +44,6 @@ class AuthController extends Controller
                 'password' => $request->password,
             ]);
 
-            // Tạo session cho customer mới đăng ký
-            $sessionId = $this->sessionService->createSession($customer->id, [
-                'name' => $customer->name,
-                'email' => $customer->email,
-            ]);
-
-            // Cập nhật last login
-            $customer->updateLastLogin();
-
             return response()->json([
                 'success' => true,
                 'message' => 'Customer registered successfully',
@@ -62,8 +53,7 @@ class AuthController extends Controller
                         'name' => $customer->name,
                         'email' => $customer->email,
                         'created_at' => $customer->created_at,
-                    ],
-                    'session_id' => $sessionId,
+                    ]
                 ]
             ], 201);
 
